@@ -1,11 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-/**
- * Canonical normalizasyon:
- * - trim
- * - tr-TR lowercase
- * - çoklu boşluk tek boşluk
- */
 function normTR(s) {
   if (s === null || s === undefined) return "";
   return s
@@ -30,11 +24,9 @@ export default function DistrictTreeNeed() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
-  // State artık LABEL değil KEY tutuyor
   const [selectedProvinceKey, setSelectedProvinceKey] = useState("");
   const [selectedDistrictKey, setSelectedDistrictKey] = useState("");
 
-  // 1) JSON yükle
   useEffect(() => {
     let alive = true;
 
@@ -65,10 +57,7 @@ export default function DistrictTreeNeed() {
     };
   }, []);
 
-  /**
-   * 2) rawLookup -> canonicalLookup (kritik)
-   * JSON key'leri nasıl olursa olsun UI canonical provKey|distKey üzerinden bulur.
-   */
+
   const prepared = useMemo(() => {
     const empty = {
       canonicalLookup: null,
@@ -129,11 +118,9 @@ export default function DistrictTreeNeed() {
     };
   }, [rawLookup]);
 
-  // 3) İlk seçimleri otomatik yap (lookup hazır olunca)
   useEffect(() => {
     if (!prepared.provinces.length) return;
 
-    // İlk il seç
     if (!selectedProvinceKey) {
       const firstProv = prepared.provinces[0].key;
       setSelectedProvinceKey(firstProv);
@@ -142,7 +129,6 @@ export default function DistrictTreeNeed() {
       return;
     }
 
-    // İl valid değilse reset
     const provExists = prepared.provinces.some((p) => p.key === selectedProvinceKey);
     if (!provExists) {
       const firstProv = prepared.provinces[0].key;
@@ -152,7 +138,6 @@ export default function DistrictTreeNeed() {
       return;
     }
 
-    // İlçe valid değilse reset
     const dists = prepared.districtsByProvinceKey.get(selectedProvinceKey) || [];
     if (!dists.length) {
       setSelectedDistrictKey("");
@@ -164,7 +149,6 @@ export default function DistrictTreeNeed() {
     }
   }, [prepared, selectedProvinceKey, selectedDistrictKey]);
 
-  // 4) Seçili canonical key
   const selectedKey = useMemo(() => {
     if (!selectedProvinceKey || !selectedDistrictKey) return "";
     return `${selectedProvinceKey}|${selectedDistrictKey}`;
@@ -175,7 +159,6 @@ export default function DistrictTreeNeed() {
     return prepared.canonicalLookup[selectedKey] || null;
   }, [prepared.canonicalLookup, selectedKey]);
 
-  // 5) Label’lar (UI için)
   const selectedProvinceLabel =
     prepared.provinceLabelByKey.get(selectedProvinceKey) || "—";
 
@@ -186,12 +169,11 @@ export default function DistrictTreeNeed() {
       ?.find((d) => d.key === selectedDistrictKey)?.label ||
     "—";
 
-  // 6) Değerler
   const yearsTarget = item?.years_target ?? 10;
   const annualTrees = item?.annual_trees_needed_capped ?? item?.annual_trees_needed ?? null;
   const totalTarget = item?.trees_needed_feasible ?? item?.trees_needed_theoretical ?? null;
 
-  // 7) Durum hesabı
+
   const status = useMemo(() => {
     if (loading) return { type: "loading", message: "Veriler yükleniyor..." };
     if (loadError) return { type: "error", message: loadError };
@@ -201,16 +183,14 @@ export default function DistrictTreeNeed() {
     if (!item)
       return { type: "error", message: "Bu il/ilçe için kayıt bulunamadı." };
 
-    // Treecover verisi yoksa
+
     const hasTreecover = item.has_treecover_data === true && item.treecover_pct !== null;
     if (!hasTreecover) return { type: "nodata", message: "Bu ilçe için ağaç örtüsü verisi yok." };
 
-    // annual alanı yoksa
     const ann = item.annual_trees_needed_capped ?? item.annual_trees_needed ?? null;
     if (ann === null || ann === undefined || Number.isNaN(Number(ann)))
       return { type: "error", message: "Yıllık dikim değeri üretilemedi (annual alanı yok/hatalı)." };
 
-    // annual = 0 ise: ihtiyaç yok
     if (Number(ann) === 0)
       return { type: "ok0", message: "Bu ilçe için ek ağaçlandırma ihtiyacı görünmüyor." };
 

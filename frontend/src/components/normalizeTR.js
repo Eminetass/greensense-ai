@@ -1,4 +1,3 @@
-// src/utils/normalizeTR.js (veya component içinde)
 export function normalizeTR(s) {
   return String(s ?? "")
     .trim()
