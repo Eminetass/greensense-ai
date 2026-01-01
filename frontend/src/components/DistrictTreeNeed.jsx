@@ -1,14 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 /**
- * Normalizasyon:
- * - tr-TR locale ile lowercase
- * - baş/son boşlukları sil
- * - çoklu boşluğu tek boşluk yap
- * Bu sayede "Kaş", "Kas", "  Kaş " gibi girişler stabil eşleşir.
+ * Canonical normalizasyon:
+ * - trim
+ * - tr-TR lowercase
+ * - çoklu boşluk tek boşluk
  */
 function normTR(s) {
-  if (!s) return "";
+  if (s === null || s === undefined) return "";
   return s
     .toString()
     .trim()
@@ -16,51 +15,30 @@ function normTR(s) {
     .replace(/\s+/g, " ");
 }
 
-/** Sayı formatı */
 function fmtIntTR(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  try {
-    return Math.round(Number(n)).toLocaleString("tr-TR");
-  } catch {
-    return String(n);
-  }
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  return Math.round(Number(n)).toLocaleString("tr-TR");
 }
 
 function fmtPctTR(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  try {
-    return Number(n).toLocaleString("tr-TR", { maximumFractionDigits: 2 });
-  } catch {
-    return String(n);
-  }
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  return Number(n).toLocaleString("tr-TR", { maximumFractionDigits: 2 });
 }
 
-/**
- * Lookup JSON yapısı (bizim ürettiğimiz):
- * {
- *  "adana|aladağ": {
- *     province_name, district_name,
- *     has_treecover_data, treecover_pct (null olabilir),
- *     potential_treecover_pct, gap_pct,
- *     annual_trees_needed, annual_trees_needed_capped, ...
- *  },
- *  ...
- * }
- */
-
 export default function DistrictTreeNeed() {
-  const [lookup, setLookup] = useState(null); // object
+  const [rawLookup, setRawLookup] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
-  const [selectedProvince, setSelectedProvince] = useState("");
-  const [selectedDistrict, setSelectedDistrict] = useState("");
+  // State artık LABEL değil KEY tutuyor
+  const [selectedProvinceKey, setSelectedProvinceKey] = useState("");
+  const [selectedDistrictKey, setSelectedDistrictKey] = useState("");
 
   // 1) JSON yükle
   useEffect(() => {
-    let isMounted = true;
+    let alive = true;
 
-    async function load() {
+    (async () => {
       setLoading(true);
       setLoadError("");
       try {
@@ -69,178 +47,195 @@ export default function DistrictTreeNeed() {
         });
         if (!res.ok) throw new Error(`JSON yüklenemedi: ${res.status}`);
         const data = await res.json();
-        if (!data || typeof data !== "object") {
-          throw new Error("JSON formatı beklenenden farklı.");
-        }
 
-        if (!isMounted) return;
-        setLookup(data);
+        if (!alive) return;
+        if (!data || typeof data !== "object") throw new Error("JSON formatı hatalı.");
+        setRawLookup(data);
       } catch (e) {
-        if (!isMounted) return;
+        if (!alive) return;
         setLoadError(e?.message || "Bilinmeyen hata");
       } finally {
-        if (!isMounted) return;
+        if (!alive) return;
         setLoading(false);
       }
-    }
+    })();
 
-    load();
     return () => {
-      isMounted = false;
+      alive = false;
     };
   }, []);
 
-  // 2) İl listesi + il->ilçe map çıkar
-  const { provinces, districtsByProvince } = useMemo(() => {
-    const map = new Map(); // provDisplay -> Set(districtDisplay)
-    if (!lookup) return { provinces: [], districtsByProvince: new Map() };
+  /**
+   * 2) rawLookup -> canonicalLookup (kritik)
+   * JSON key'leri nasıl olursa olsun UI canonical provKey|distKey üzerinden bulur.
+   */
+  const prepared = useMemo(() => {
+    const empty = {
+      canonicalLookup: null,
+      provinces: [],
+      provinceLabelByKey: new Map(),
+      districtsByProvinceKey: new Map(),
+      districtLabelByProvDistKey: new Map(),
+    };
 
-    for (const k of Object.keys(lookup)) {
-      const item = lookup[k];
-      const prov = item?.province_name;
-      const dist = item?.district_name;
-      if (!prov || !dist) continue;
+    if (!rawLookup) return empty;
 
-      if (!map.has(prov)) map.set(prov, new Set());
-      map.get(prov).add(dist);
+    const canonicalLookup = {}; // "aydın|merkez" -> item
+    const provinceLabelByKey = new Map(); // provKey -> "Aydın"
+    const districtsByProvinceKey = new Map(); // provKey -> [{key,label}]
+    const districtLabelByProvDistKey = new Map(); // "provKey|distKey" -> "Merkez"
+    const districtSetByProv = new Map(); // provKey -> Map(distKey -> label)
+
+    for (const originalKey of Object.keys(rawLookup)) {
+      const item = rawLookup[originalKey];
+      const provLabel = item?.province_name;
+      const distLabel = item?.district_name;
+      if (!provLabel || !distLabel) continue;
+
+      const provKey = normTR(provLabel);
+      const distKey = normTR(distLabel);
+      if (!provKey || !distKey) continue;
+
+      const canonKey = `${provKey}|${distKey}`;
+      canonicalLookup[canonKey] = item;
+
+      if (!provinceLabelByKey.has(provKey)) {
+        provinceLabelByKey.set(provKey, provLabel);
+      }
+
+      if (!districtSetByProv.has(provKey)) districtSetByProv.set(provKey, new Map());
+      districtSetByProv.get(provKey).set(distKey, distLabel);
+
+      districtLabelByProvDistKey.set(canonKey, distLabel);
     }
 
-    // alfabetik sırala
-    const provArr = Array.from(map.keys()).sort((a, b) =>
-      a.localeCompare(b, "tr")
-    );
+    const provinces = Array.from(provinceLabelByKey.entries())
+      .map(([key, label]) => ({ key, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, "tr"));
 
-    // ilçeleri de sırala
-    const districtsMap = new Map();
-    for (const prov of provArr) {
-      const arr = Array.from(map.get(prov)).sort((a, b) =>
-        a.localeCompare(b, "tr")
-      );
-      districtsMap.set(prov, arr);
+    for (const [provKey, distMap] of districtSetByProv.entries()) {
+      const arr = Array.from(distMap.entries())
+        .map(([key, label]) => ({ key, label }))
+        .sort((a, b) => a.label.localeCompare(b.label, "tr"));
+      districtsByProvinceKey.set(provKey, arr);
     }
 
-    return { provinces: provArr, districtsByProvince: districtsMap };
-  }, [lookup]);
+    return {
+      canonicalLookup,
+      provinces,
+      provinceLabelByKey,
+      districtsByProvinceKey,
+      districtLabelByProvDistKey,
+    };
+  }, [rawLookup]);
 
-  // 3) İlk değerleri otomatik seç
+  // 3) İlk seçimleri otomatik yap (lookup hazır olunca)
   useEffect(() => {
-    if (!provinces.length) return;
+    if (!prepared.provinces.length) return;
 
-    // İl seçili değilse ilk ili seç
-    if (!selectedProvince) {
-      setSelectedProvince(provinces[0]);
+    // İlk il seç
+    if (!selectedProvinceKey) {
+      const firstProv = prepared.provinces[0].key;
+      setSelectedProvinceKey(firstProv);
+      const firstDist = prepared.districtsByProvinceKey.get(firstProv)?.[0]?.key || "";
+      setSelectedDistrictKey(firstDist);
       return;
     }
 
-    // Seçili il yoksa veya listede değilse ilk ili seç
-    if (!provinces.includes(selectedProvince)) {
-      setSelectedProvince(provinces[0]);
+    // İl valid değilse reset
+    const provExists = prepared.provinces.some((p) => p.key === selectedProvinceKey);
+    if (!provExists) {
+      const firstProv = prepared.provinces[0].key;
+      setSelectedProvinceKey(firstProv);
+      const firstDist = prepared.districtsByProvinceKey.get(firstProv)?.[0]?.key || "";
+      setSelectedDistrictKey(firstDist);
       return;
     }
 
-    // Seçili ilçe yoksa o ilin ilk ilçesini seç
-    const dists = districtsByProvince.get(selectedProvince) || [];
-    if (!selectedDistrict && dists.length) {
-      setSelectedDistrict(dists[0]);
+    // İlçe valid değilse reset
+    const dists = prepared.districtsByProvinceKey.get(selectedProvinceKey) || [];
+    if (!dists.length) {
+      setSelectedDistrictKey("");
       return;
     }
-
-    // Seçili ilçe, o ilde yoksa ilk ilçeye çek
-    if (selectedDistrict && dists.length && !dists.includes(selectedDistrict)) {
-      setSelectedDistrict(dists[0]);
+    const distExists = dists.some((d) => d.key === selectedDistrictKey);
+    if (!selectedDistrictKey || !distExists) {
+      setSelectedDistrictKey(dists[0].key);
     }
-  }, [provinces, districtsByProvince, selectedProvince, selectedDistrict]);
+  }, [prepared, selectedProvinceKey, selectedDistrictKey]);
 
-  // 4) İl değişince ilçe listesini resetle (ilk ilçeyi seç)
-  useEffect(() => {
-    if (!selectedProvince) return;
-    const dists = districtsByProvince.get(selectedProvince) || [];
-    if (dists.length) setSelectedDistrict(dists[0]);
-    else setSelectedDistrict("");
-  }, [selectedProvince, districtsByProvince]);
-
-  // 5) Seçili item
+  // 4) Seçili canonical key
   const selectedKey = useMemo(() => {
-    const prov = normTR(selectedProvince);
-    const dist = normTR(selectedDistrict);
-    if (!prov || !dist) return "";
-    return `${prov}|${dist}`;
-  }, [selectedProvince, selectedDistrict]);
+    if (!selectedProvinceKey || !selectedDistrictKey) return "";
+    return `${selectedProvinceKey}|${selectedDistrictKey}`;
+  }, [selectedProvinceKey, selectedDistrictKey]);
 
   const item = useMemo(() => {
-    if (!lookup || !selectedKey) return null;
-    return lookup[selectedKey] || null;
-  }, [lookup, selectedKey]);
+    if (!prepared.canonicalLookup || !selectedKey) return null;
+    return prepared.canonicalLookup[selectedKey] || null;
+  }, [prepared.canonicalLookup, selectedKey]);
 
-  // 6) UI durumları
+  // 5) Label’lar (UI için)
+  const selectedProvinceLabel =
+    prepared.provinceLabelByKey.get(selectedProvinceKey) || "—";
+
+  const selectedDistrictLabel =
+    prepared.districtLabelByProvDistKey.get(selectedKey) ||
+    prepared.districtsByProvinceKey
+      .get(selectedProvinceKey)
+      ?.find((d) => d.key === selectedDistrictKey)?.label ||
+    "—";
+
+  // 6) Değerler
+  const yearsTarget = item?.years_target ?? 10;
+  const annualTrees = item?.annual_trees_needed_capped ?? item?.annual_trees_needed ?? null;
+  const totalTarget = item?.trees_needed_feasible ?? item?.trees_needed_theoretical ?? null;
+
+  // 7) Durum hesabı
   const status = useMemo(() => {
     if (loading) return { type: "loading", message: "Veriler yükleniyor..." };
     if (loadError) return { type: "error", message: loadError };
-    if (!lookup) return { type: "error", message: "Lookup verisi bulunamadı." };
-    if (!selectedProvince || !selectedDistrict)
+    if (!prepared.canonicalLookup) return { type: "error", message: "Lookup verisi yok." };
+    if (!selectedProvinceKey || !selectedDistrictKey)
       return { type: "idle", message: "İl/ilçe seçiniz." };
     if (!item)
-      return {
-        type: "error",
-        message:
-          "Bu il/ilçe için kayıt bulunamadı. (Normalizasyon veya anahtar uyumsuz olabilir)",
-      };
+      return { type: "error", message: "Bu il/ilçe için kayıt bulunamadı." };
 
-    // Veri yok kriteri: has_treecover_data false veya treecover_pct null
-    const hasData =
-      item.has_treecover_data === true && item.treecover_pct !== null;
+    // Treecover verisi yoksa
+    const hasTreecover = item.has_treecover_data === true && item.treecover_pct !== null;
+    if (!hasTreecover) return { type: "nodata", message: "Bu ilçe için ağaç örtüsü verisi yok." };
 
-    if (!hasData) {
-      return {
-        type: "nodata",
-        message:
-          "Bu ilçe için treecover verisi yok. (treecover_pct null / has_treecover_data=false)",
-      };
-    }
+    // annual alanı yoksa
+    const ann = item.annual_trees_needed_capped ?? item.annual_trees_needed ?? null;
+    if (ann === null || ann === undefined || Number.isNaN(Number(ann)))
+      return { type: "error", message: "Yıllık dikim değeri üretilemedi (annual alanı yok/hatalı)." };
 
-    // annual değer var mı?
-    const annual =
-      item.annual_trees_needed_capped ?? item.annual_trees_needed ?? null;
-
-    if (annual === null || annual === undefined || Number.isNaN(Number(annual))) {
-      return {
-        type: "error",
-        message:
-          "Bu ilçe için yıllık dikim değeri üretilemedi. JSON alanlarını kontrol et.",
-      };
-    }
+    // annual = 0 ise: ihtiyaç yok
+    if (Number(ann) === 0)
+      return { type: "ok0", message: "Bu ilçe için ek ağaçlandırma ihtiyacı görünmüyor." };
 
     return { type: "ok", message: "" };
-  }, [loading, loadError, lookup, selectedProvince, selectedDistrict, item]);
-
-  // 7) Hesap/Değerler
-  const annualTrees =
-    item?.annual_trees_needed_capped ?? item?.annual_trees_needed ?? null;
-
-  const totalTarget =
-    item?.trees_needed_feasible ?? item?.trees_needed_theoretical ?? null;
-
-  const yearsTarget = item?.years_target ?? 10;
+  }, [loading, loadError, prepared.canonicalLookup, selectedProvinceKey, selectedDistrictKey, item]);
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "40px 24px" }}>
-      <h1 style={{ fontSize: 56, margin: 0, letterSpacing: -1 }}>
-        İlçe Ağaç İhtiyacı
-      </h1>
+      <h1 style={{ fontSize: 56, margin: 0, letterSpacing: -1 }}>İlçe Ağaç İhtiyacı</h1>
       <p style={{ marginTop: 10, color: "#5b6774", fontSize: 16 }}>
-        İl/ilçe seçice <b>{yearsTarget} yıllık hedefe göre</b> yıllık ortalamanın
-        dikilmesi gereken fidan miktarını gösterir.
+        İl/ilçe seçince <b>{yearsTarget} yıllık hedefe göre</b> yıllık ortalama dikilmesi gereken fidan miktarını gösterir.
       </p>
 
       {/* Seçimler */}
       <div style={{ display: "flex", gap: 14, marginTop: 18, flexWrap: "wrap" }}>
         <div style={{ minWidth: 340 }}>
-          <label style={{ display: "block", marginBottom: 6, color: "#334" }}>
-            İl
-          </label>
+          <label style={{ display: "block", marginBottom: 6, color: "#334" }}>İl</label>
           <select
-            value={selectedProvince}
-            onChange={(e) => setSelectedProvince(e.target.value)}
+            value={selectedProvinceKey}
+            onChange={(e) => {
+              const newProvKey = e.target.value;
+              setSelectedProvinceKey(newProvKey);
+              const firstDist = prepared.districtsByProvinceKey.get(newProvKey)?.[0]?.key || "";
+              setSelectedDistrictKey(firstDist);
+            }}
             style={{
               width: "100%",
               padding: "12px 14px",
@@ -250,21 +245,19 @@ export default function DistrictTreeNeed() {
             }}
             disabled={loading || !!loadError}
           >
-            {provinces.map((p) => (
-              <option key={p} value={p}>
-                {p}
+            {prepared.provinces.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.label}
               </option>
             ))}
           </select>
         </div>
 
         <div style={{ minWidth: 340 }}>
-          <label style={{ display: "block", marginBottom: 6, color: "#334" }}>
-            İlçe
-          </label>
+          <label style={{ display: "block", marginBottom: 6, color: "#334" }}>İlçe</label>
           <select
-            value={selectedDistrict}
-            onChange={(e) => setSelectedDistrict(e.target.value)}
+            value={selectedDistrictKey}
+            onChange={(e) => setSelectedDistrictKey(e.target.value)}
             style={{
               width: "100%",
               padding: "12px 14px",
@@ -272,11 +265,11 @@ export default function DistrictTreeNeed() {
               border: "1px solid #cfd7df",
               fontSize: 16,
             }}
-            disabled={loading || !!loadError || !selectedProvince}
+            disabled={loading || !!loadError || !selectedProvinceKey}
           >
-            {(districtsByProvince.get(selectedProvince) || []).map((d) => (
-              <option key={d} value={d}>
-                {d}
+            {(prepared.districtsByProvinceKey.get(selectedProvinceKey) || []).map((d) => (
+              <option key={d.key} value={d.key}>
+                {d.label}
               </option>
             ))}
           </select>
@@ -294,9 +287,10 @@ export default function DistrictTreeNeed() {
           boxShadow: "0 10px 30px rgba(16, 24, 40, 0.06)",
         }}
       >
-        <h2 style={{ margin: 0, fontSize: 28 }}>
-          {selectedProvince || "—"} / {selectedDistrict || "—"}
-        </h2>
+        {/* Başlık: doğru label’ı göster (takılı kalmaz) */}
+        {/*<h2 style={{ margin: 0, fontSize: 28 }}>
+          {selectedProvinceLabel} / {selectedDistrictLabel}
+        </h2>*/}
 
         {status.type === "loading" && (
           <p style={{ marginTop: 14, color: "#5b6774" }}>{status.message}</p>
@@ -310,8 +304,14 @@ export default function DistrictTreeNeed() {
           <p style={{ marginTop: 14, color: "#d12c2c" }}>{status.message}</p>
         )}
 
-        {status.type === "ok" && (
+        {(status.type === "ok" || status.type === "ok0") && (
           <>
+            {status.type === "ok0" && (
+              <p style={{ marginTop: 14, color: "#1f7a1f", fontWeight: 600 }}>
+                {status.message}
+              </p>
+            )}
+
             <div
               style={{
                 display: "grid",
@@ -336,7 +336,7 @@ export default function DistrictTreeNeed() {
                   {fmtIntTR(totalTarget)}
                 </div>
                 <div style={{ color: "#5b6774", marginTop: 4 }}>
-                  ({yearsTarget} yıl kaldı)
+                  ({yearsTarget} yıl)
                 </div>
               </div>
             </div>
@@ -351,38 +351,26 @@ export default function DistrictTreeNeed() {
               }}
             >
               <div>
-                <div style={{ color: "#5b6774", fontSize: 13 }}>
-                  Mevcut ağaç örtüsü (%)
-                </div>
+                <div style={{ color: "#5b6774", fontSize: 13 }}>Mevcut ağaç örtüsü (%)</div>
                 <div style={{ fontSize: 18, fontWeight: 650, marginTop: 6 }}>
                   {fmtPctTR(item.treecover_pct)}
                 </div>
               </div>
 
               <div>
-                <div style={{ color: "#5b6774", fontSize: 13 }}>
-                  Model potansiyeli (%)
-                </div>
+                <div style={{ color: "#5b6774", fontSize: 13 }}>Model potansiyeli (%)</div>
                 <div style={{ fontSize: 18, fontWeight: 650, marginTop: 6 }}>
                   {fmtPctTR(item.potential_treecover_pct)}
                 </div>
               </div>
 
               <div>
-                <div style={{ color: "#5b6774", fontSize: 13 }}>
-                  Açık (boşluk, %)
-                </div>
+                <div style={{ color: "#5b6774", fontSize: 13 }}>Açık (boşluk, %)</div>
                 <div style={{ fontSize: 18, fontWeight: 650, marginTop: 6 }}>
                   {fmtPctTR(item.gap_pct)}
                 </div>
               </div>
             </div>
-
-            {/* Debug istersen aç */}
-            {/* <pre style={{ marginTop: 16, background: "#f7fafc", padding: 12, borderRadius: 10, overflow: "auto" }}>
-              key: {selectedKey}{"\n"}
-              {JSON.stringify(item, null, 2)}
-            </pre> */}
           </>
         )}
       </div>
